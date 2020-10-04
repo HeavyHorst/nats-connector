@@ -4,6 +4,7 @@
 package nats
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"sync"
@@ -16,6 +17,10 @@ import (
 const queueGroup = "openfaas_nats_worker_group"
 
 const clientName = "openfaas_connector"
+
+type contextKey string
+
+var contextKeyRespFunc = contextKey("respFunc")
 
 // BrokerConfig high level config for the broker
 type BrokerConfig struct {
@@ -34,6 +39,14 @@ type Broker interface {
 
 type broker struct {
 	client *nats.Conn
+}
+
+type ResponseSubscriber struct {
+}
+
+func (rs *ResponseSubscriber) Response(resp types.InvokerResponse) {
+	respFunc := resp.Context.Value(contextKeyRespFunc).(func([]byte) error)
+	respFunc(*resp.Body)
 }
 
 // NATSPort hard-coded port for NATS
@@ -77,14 +90,16 @@ func (b *broker) Subscribe(controller types.Controller, topics []string) error {
 	wg := sync.WaitGroup{}
 	wg.Add(1)
 
+	controller.Subscribe(&ResponseSubscriber{})
+
 	subs := []*nats.Subscription{}
 	for _, topic := range topics {
 		log.Printf("Binding to topic: %q", topic)
 
 		sub, err := b.client.QueueSubscribe(topic, queueGroup, func(m *nats.Msg) {
 			log.Printf("Topic: %s, message: %q", m.Subject, string(m.Data))
-
-			controller.Invoke(m.Subject, &m.Data)
+			ctx := context.WithValue(context.Background(), contextKeyRespFunc, m.Respond)
+			controller.InvokeWithContext(ctx, m.Subject, &m.Data)
 		})
 		subs = append(subs, sub)
 
